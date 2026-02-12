@@ -8,289 +8,266 @@ $ErrorActionPreference = "Stop"
 # -------------------------
 # Config
 # -------------------------
-$AppName  = "KrakenNowPlaying"
-$BaseDir  = Join-Path $env:LOCALAPPDATA $AppName
-$AppDir   = Join-Path $BaseDir "app"
-$ServerDir= Join-Path $AppDir  "server"
-$ExtDir   = Join-Path $AppDir  "extension"
-$LogDir   = Join-Path $BaseDir "logs"
-$LogPath  = Join-Path $LogDir  "server.log"
+$AppName   = "KrakenNowPlaying"
+$BaseDir   = Join-Path $env:LOCALAPPDATA $AppName
+$AppDir    = Join-Path $BaseDir "app"
+$ServerDir = Join-Path $AppDir "server"
+$ExtDir    = Join-Path $AppDir "extension"
 
-$Port     = 27123
-$Url      = "http://127.0.0.1:$Port/"
+$LogDir     = Join-Path $BaseDir "logs"
+$InstallLog = Join-Path $LogDir "install.log"
+$ServerLog  = Join-Path $LogDir "server.log"
 
-$TaskServer = "$AppName (Server AutoStart)"
-$TaskTray   = "$AppName (Health Tray)"
+$Port = 27123
+$Url  = "http://127.0.0.1:$Port/"
+
+$TaskAll = "$AppName (AutoStart)"
+
+$StartMenuFolder = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$AppName"
+$DesktopDir = [Environment]::GetFolderPath("Desktop")
 
 $NodeInstallerUrl  = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-x64.msi"
 $NodeInstallerPath = Join-Path $BaseDir "node-lts-x64.msi"
 
-# Start Menu folder
-$StartMenuFolder = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$AppName"
-$DesktopDir = [Environment]::GetFolderPath("Desktop")
+# Source folders relative to this installer script
+$SrcRoot    = Split-Path -Parent $MyInvocation.MyCommand.Path
+$SrcServer  = Join-Path $SrcRoot "server"
+$SrcExt     = Join-Path $SrcRoot "extension"
+$SrcAssets  = Join-Path $SrcRoot "assets"
+$SrcIcon    = Join-Path $SrcAssets "icon.ico"
 
-# Source folders relative to installer.ps1
-$SrcRoot   = Split-Path -Parent $MyInvocation.MyCommand.Path
-$SrcServer = Join-Path $SrcRoot "server"
-$SrcExt    = Join-Path $SrcRoot "extension"
+# Installed icon path
+$IconPath   = Join-Path $BaseDir "icon.ico"
 
 # -------------------------
-# Helpers
+# Helpers / logging
 # -------------------------
-function I($m){ Write-Host "ℹ️  $m" -ForegroundColor Cyan }
-function OK($m){ Write-Host "✅ $m" -ForegroundColor Green }
-function W($m){ Write-Host "⚠️  $m" -ForegroundColor Yellow }
-function F($m){ Write-Host "❌ $m" -ForegroundColor Red; exit 1 }
+function EnsureDir([string]$p) { New-Item -ItemType Directory -Force -Path $p | Out-Null }
 
-function EnsureDir($p){ New-Item -ItemType Directory -Force -Path $p | Out-Null }
-function HasCmd($n){ return [bool](Get-Command $n -ErrorAction SilentlyContinue) }
+EnsureDir $LogDir
 
+function LogLine([string]$msg) {
+  $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg"
+  Add-Content -Path $InstallLog -Value $line
+}
+
+function Info([string]$m) { Write-Host "[INFO] $m"; LogLine "INFO: $m" }
+function Ok([string]$m)   { Write-Host "[ OK ] $m"; LogLine "OK: $m" }
+function Warn([string]$m) { Write-Host "[WARN] $m"; LogLine "WARN: $m" }
+function Fail([string]$m) { Write-Host "[FAIL] $m"; LogLine "FAIL: $m"; throw $m }
+
+function HasCmd([string]$n) { return [bool](Get-Command $n -ErrorAction SilentlyContinue) }
+
+# -------------------------
+# Node checks
+# -------------------------
 function Find-NodeExe {
   $candidates = @(
-    (Join-Path ${env:ProgramFiles} "nodejs\node.exe"),
+    (Join-Path $env:ProgramFiles "nodejs\node.exe"),
     (Join-Path ${env:ProgramFiles(x86)} "nodejs\node.exe"),
     (Join-Path $env:LOCALAPPDATA "Programs\nodejs\node.exe")
   )
-  foreach ($p in $candidates) { if ($p -and (Test-Path $p)) { return $p } }
+  foreach ($p in $candidates) {
+    if ($p -and (Test-Path $p)) { return $p }
+  }
   return $null
 }
 
-function Ensure-NodeBinOnPath($nodeExePath) {
-  $nodeDir = Split-Path -Parent $nodeExePath
+function Ensure-NodeOnPathForThisProcess([string]$nodeExe) {
+  if (-not $nodeExe) { return }
+  $nodeDir = Split-Path -Parent $nodeExe
   if ($env:Path -notlike "*$nodeDir*") { $env:Path = "$nodeDir;$env:Path" }
 
-  $npmCmdCandidates = @(
-    (Join-Path $nodeDir "npm.cmd"),
-    (Join-Path $env:APPDATA "npm\npm.cmd")
-  )
-  foreach ($c in $npmCmdCandidates) {
-    if (Test-Path $c) {
-      $npmDir = Split-Path -Parent $c
-      if ($env:Path -notlike "*$npmDir*") { $env:Path = "$npmDir;$env:Path" }
-      break
-    }
+  $npmDir = Join-Path $env:APPDATA "npm"
+  if ((Test-Path $npmDir) -and ($env:Path -notlike "*$npmDir*")) {
+    $env:Path = "$npmDir;$env:Path"
   }
 }
 
 function Ensure-NodeInstalled {
   if (HasCmd "node" -and HasCmd "npm") {
-    OK "Node present: $(node -v) | npm: $(npm -v)"
+    Ok "Node present: $(node -v) | npm: $(npm -v)"
     return
   }
 
   $nodeExe = Find-NodeExe
   if ($nodeExe) {
-    Ensure-NodeBinOnPath $nodeExe
+    Ensure-NodeOnPathForThisProcess $nodeExe
     if (HasCmd "node" -and HasCmd "npm") {
-      OK "Node found (PATH refreshed): $(node -v) | npm: $(npm -v)"
+      Ok "Node found (PATH refreshed): $(node -v) | npm: $(npm -v)"
       return
     }
   }
 
-  W "Node.js not found. This installer can download and run the official Node LTS installer."
+  Warn "Node.js not found. This installer can download and run the official Node LTS installer."
   $resp = Read-Host "Install Node LTS now? (Y/N)"
-  if ($resp -notin @("Y","y")) { F "Node is required. Install Node LTS then rerun." }
+  if ($resp -notin @("Y","y")) { Fail "Node is required. Install Node LTS then rerun." }
 
   EnsureDir $BaseDir
-  try {
-    I "Downloading Node installer..."
-    Invoke-WebRequest -Uri $NodeInstallerUrl -OutFile $NodeInstallerPath -UseBasicParsing
-    OK "Downloaded: $NodeInstallerPath"
-  } catch { F "Node download failed: $($_.Exception.Message)" }
 
-  I "Launching installer (complete install). Waiting..."
+  Info "Downloading Node installer..."
+  Invoke-WebRequest -Uri $NodeInstallerUrl -OutFile $NodeInstallerPath -UseBasicParsing
+  Ok "Downloaded: $NodeInstallerPath"
+
+  Info "Launching Node installer. Waiting..."
   try {
     $p = Start-Process "msiexec.exe" -ArgumentList "/i `"$NodeInstallerPath`"" -PassThru -Verb RunAs
     $p.WaitForExit()
   } catch {
-    W "Could not elevate; trying without elevation..."
+    Warn "Could not elevate; trying without elevation..."
     $p = Start-Process "msiexec.exe" -ArgumentList "/i `"$NodeInstallerPath`"" -PassThru
     $p.WaitForExit()
   }
 
   $nodeExe = Find-NodeExe
-  if (-not $nodeExe) { F "Installer finished but node.exe not found. Install Node manually then rerun." }
+  if (-not $nodeExe) { Fail "Node installer finished but node.exe not found." }
 
-  Ensure-NodeBinOnPath $nodeExe
-  if (!(HasCmd "node") -or !(HasCmd "npm")) { F "Node installed but not available in this session. Log off/on then rerun." }
+  Ensure-NodeOnPathForThisProcess $nodeExe
+  if (!(HasCmd "node") -or !(HasCmd "npm")) {
+    Fail "Node installed but not available in this PowerShell session. Log off/on then rerun."
+  }
 
-  OK "Node installed: $(node -v) | npm: $(npm -v)"
+  Ok "Node installed: $(node -v) | npm: $(npm -v)"
 }
 
+# -------------------------
+# Install files
+# -------------------------
 function CopyProjectFiles {
-  if (!(Test-Path $SrcServer)) { F "Missing source folder: $SrcServer" }
-  if (!(Test-Path $SrcExt))    { F "Missing source folder: $SrcExt" }
-  if (!(Test-Path (Join-Path $SrcServer "package.json"))) { F "Missing server\package.json" }
-  if (!(Test-Path (Join-Path $SrcServer "server.js")))    { F "Missing server\server.js" }
-  if (!(Test-Path (Join-Path $SrcExt "manifest.json")))   { F "Missing extension\manifest.json" }
+  if (!(Test-Path $SrcServer)) { Fail "Missing source folder: $SrcServer" }
+  if (!(Test-Path $SrcExt))    { Fail "Missing source folder: $SrcExt" }
 
-  EnsureDir $AppDir; EnsureDir $ServerDir; EnsureDir $ExtDir; EnsureDir $LogDir
+  if (!(Test-Path (Join-Path $SrcServer "package.json"))) { Fail "Missing server\package.json" }
+  if (!(Test-Path (Join-Path $SrcServer "server.js")))    { Fail "Missing server\server.js" }
+  if (!(Test-Path (Join-Path $SrcExt "manifest.json")))   { Fail "Missing extension\manifest.json" }
 
-  I "Copying server..."
+  EnsureDir $AppDir
+  EnsureDir $ServerDir
+  EnsureDir $ExtDir
+
+  Info "Copying server..."
   Copy-Item -Path (Join-Path $SrcServer "*") -Destination $ServerDir -Recurse -Force
-  I "Copying extension..."
-  Copy-Item -Path (Join-Path $SrcExt "*")    -Destination $ExtDir   -Recurse -Force
 
-  OK "Files installed to: $AppDir"
+  Info "Copying extension..."
+  Copy-Item -Path (Join-Path $SrcExt "*") -Destination $ExtDir -Recurse -Force
+
+  # Optional icon
+  if (Test-Path $SrcIcon) {
+    Copy-Item -Path $SrcIcon -Destination $IconPath -Force
+    Ok "Icon installed: $IconPath"
+  } else {
+    Warn "No icon found at $SrcIcon (shortcuts will use default Windows icon)."
+  }
+
+  Ok "Files copied to $AppDir"
 }
 
 function InstallServerDeps([switch]$Force) {
   Push-Location $ServerDir
   try {
     if ($Force) {
-      I "Repair: reinstalling dependencies (npm install)..."
+      Info "Repair: npm install"
       npm install | Out-Null
-      OK "Dependencies repaired."
+      Ok "Dependencies repaired."
       return
     }
 
     if (!(Test-Path (Join-Path $ServerDir "node_modules"))) {
-      I "Installing dependencies (npm install)..."
+      Info "npm install"
       npm install | Out-Null
-      OK "Dependencies installed."
+      Ok "Dependencies installed."
     } else {
-      OK "Dependencies already present."
+      Ok "Dependencies already present."
     }
-  } finally { Pop-Location }
+  } finally {
+    Pop-Location
+  }
 }
 
 # -------------------------
-# Runtime scripts
+# Runtime scripts (hidden launches)
 # -------------------------
 function WriteRuntimeScripts {
-  # Hidden runner VBS (no console)
-  $vbsPath = Join-Path $BaseDir "RunServerHidden.vbs"
-  @"
-Dim shell : Set shell = CreateObject("WScript.Shell")
-shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""$BaseDir\Server-Run.ps1""", 0, False
-"@ | Set-Content -Path $vbsPath -Encoding ASCII
+  EnsureDir $BaseDir
+  EnsureDir $LogDir
 
-  # Server-Run.ps1 (logs only)
-  $runPs1 = Join-Path $BaseDir "Server-Run.ps1"
-  @"
+  # ---- Stop-Server.ps1 (kills process tree owning port; avoids $PID reserved var) ----
+  $stopPs1 = Join-Path $BaseDir "Stop-Server.ps1"
+@"
+`$ErrorActionPreference = "SilentlyContinue"
+`$port = $Port
+
+function Kill-Tree([int]`$p) {
+  if (-not `$p) { return }
+  & taskkill.exe /PID `$p /T /F | Out-Null
+}
+
+# Kill anything listening on the port (covers respawners like nodemon via /T)
+`$conns = Get-NetTCPConnection -LocalPort `$port -ErrorAction SilentlyContinue
+if (`$conns) {
+  `$pids = `$conns | Select-Object -ExpandProperty OwningProcess -Unique
+  foreach (`$p in `$pids) { Kill-Tree ([int]`$p) }
+}
+
+# Extra safety: kill node/nodemon whose command line mentions server.js or this app path
+try {
+  `$procs = Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='nodemon.exe'" -ErrorAction SilentlyContinue
+  foreach (`$proc in `$procs) {
+    `$cmd = `$proc.CommandLine
+    if (`$cmd -and (`$cmd -match "server\.js" -or `$cmd -match "KrakenNowPlaying" -or `$cmd -match "now-playing")) {
+      Kill-Tree ([int]`$proc.ProcessId)
+    }
+  }
+} catch {}
+
+Write-Host "Stop complete."
+"@ | Set-Content -Path $stopPs1 -Encoding UTF8
+
+  # ---- Server runner (no window) ----
+  $serverRunPs1 = Join-Path $BaseDir "Server-Run.ps1"
+@"
 `$ErrorActionPreference = "Stop"
 `$serverDir = "$ServerDir"
-`$logDir = "$LogDir"
-`$log = "$LogPath"
+`$log = "$ServerLog"
 
-New-Item -ItemType Directory -Force -Path `$logDir | Out-Null
-
-function Find-NodeExe {
-  `$c = @(
-    (Join-Path `${env:ProgramFiles} "nodejs\node.exe"),
-    (Join-Path `${env:ProgramFiles(x86)} "nodejs\node.exe"),
-    (Join-Path `${env:LOCALAPPDATA} "Programs\nodejs\node.exe")
-  )
-  foreach (`$p in `$c) { if (`$p -and (Test-Path `$p)) { return `$p } }
-  return `$null
-}
-
-`$nodeExe = Find-NodeExe
-if (`$nodeExe) {
-  `$nodeDir = Split-Path -Parent `$nodeExe
-  if (`$env:Path -notlike "*`$nodeDir*") { `$env:Path = "`$nodeDir;`$env:Path" }
-  `$npmDir = Join-Path `${env:APPDATA} "npm"
-  if (Test-Path `$npmDir -and `$env:Path -notlike "*`$npmDir*") { `$env:Path = "`$npmDir;`$env:Path" }
-}
-
+New-Item -ItemType Directory -Force -Path "$(Split-Path -Parent $ServerLog)" | Out-Null
 Set-Location `$serverDir
 
-"`$(Get-Date -Format o) Starting server..." | Add-Content `$log
-try {
-  # If already running, don't start another
-  try {
-    `$conn = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
-    if (`$conn) {
-      "`$(Get-Date -Format o) Port $Port already in use; assuming server running." | Add-Content `$log
-      exit 0
-    }
-  } catch {}
+"`$(Get-Date -Format o) Server-Run start" | Add-Content `$log
 
+# Avoid duplicates by port
+try {
+  `$conn = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
+  if (`$conn) {
+    "`$(Get-Date -Format o) Port $Port already in use; assume running." | Add-Content `$log
+    exit 0
+  }
+} catch {}
+
+try {
   npm start 2>&1 | Tee-Object -FilePath `$log -Append | Out-Null
 } catch {
   "`$(Get-Date -Format o) Server crashed: `$($_.Exception.Message)" | Add-Content `$log
   exit 1
 }
-"@ | Set-Content -Path $runPs1 -Encoding UTF8
+"@ | Set-Content -Path $serverRunPs1 -Encoding UTF8
 
-  # Stop-Server.ps1
-  $stopPs1 = Join-Path $BaseDir "Stop-Server.ps1"
-  @"
-`$ErrorActionPreference = "SilentlyContinue"
-`$port = $Port
-`$conns = Get-NetTCPConnection -LocalPort `$port -ErrorAction SilentlyContinue
-if (`$conns) {
-  `$pids = `$conns | Select-Object -ExpandProperty OwningProcess -Unique
-  foreach (`$pid in `$pids) { Stop-Process -Id `$pid -Force -ErrorAction SilentlyContinue }
-  Write-Host "Stopped process(es) on port `$port"
-} else {
-  Write-Host "No process found listening on port `$port"
-}
-"@ | Set-Content -Path $stopPs1 -Encoding UTF8
-
-  # Open-CAM-URL.ps1
-  $openCamPs1 = Join-Path $BaseDir "Open-CAM-URL.ps1"
-  @"
-`$ErrorActionPreference = "SilentlyContinue"
-`$url = "$Url"
-
-Set-Clipboard -Value `$url
-Write-Host "Copied URL to clipboard: `$url"
-
-`$candidates = @(
-  (Join-Path `${env:ProgramFiles} "NZXT CAM\CAM.exe"),
-  (Join-Path `${env:ProgramFiles(x86)} "NZXT CAM\CAM.exe")
-)
-foreach (`$p in `$candidates) {
-  if (Test-Path `$p) { Start-Process `$p | Out-Null; break }
-}
-
-Start-Process `$url | Out-Null
-"@ | Set-Content -Path $openCamPs1 -Encoding UTF8
-
-  # Repair.ps1 entrypoint
-  $repairPs1 = Join-Path $BaseDir "Repair.ps1"
-  @"
-Start-Process "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$SrcRoot\installer.ps1`" -Mode Repair" -Verb RunAs
-"@ | Set-Content -Path $repairPs1 -Encoding UTF8
-
-  # Extension instructions
-  $howTxt = Join-Path $BaseDir "INSTALL-EXTENSION.txt"
-  @"
-Chrome extension install (one-time):
-1) Open Chrome: chrome://extensions
-2) Enable Developer mode (top right)
-3) Click "Load unpacked"
-4) Select:
-   $ExtDir
-
-Test:
-- Play a YouTube video
-- Open: http://127.0.0.1:$Port/nowplaying
-
-NZXT CAM:
-- Web Integration URL: $Url
-"@ | Set-Content -Path $howTxt -Encoding UTF8
-
-  OK "Runtime scripts written to: $BaseDir"
-}
-
-# -------------------------
-# Health tray (NotifyIcon + alerts)
-# -------------------------
-function WriteHealthTray {
+  # ---- Tray script: Quit runs Stop-Server IN THIS PROCESS, verifies port, then exits tray ----
   $trayPs1 = Join-Path $BaseDir "HealthTray.ps1"
-  @"
+@"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-`$url = "$Url"
-`$checkUrl = "http://127.0.0.1:$Port/nowplaying"
+`$port       = $Port
+`$checkUrl   = "http://127.0.0.1:$Port/nowplaying"
+`$displayUrl = "$Url"
+`$baseDir    = Join-Path `$env:LOCALAPPDATA "$AppName"
+`$stopPs1    = Join-Path `$baseDir "Stop-Server.ps1"
+`$serverLog  = Join-Path `$baseDir "logs\server.log"
 
 function MakeIcon([System.Drawing.Color]`$color) {
   `$bmp = New-Object System.Drawing.Bitmap 16,16
   `$g = [System.Drawing.Graphics]::FromImage(`$bmp)
-  `$g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
   `$g.Clear([System.Drawing.Color]::Transparent)
   `$brush = New-Object System.Drawing.SolidBrush `$color
   `$g.FillEllipse(`$brush, 1,1,14,14)
@@ -302,24 +279,54 @@ function MakeIcon([System.Drawing.Color]`$color) {
 `$iconDown = MakeIcon ([System.Drawing.Color]::Red)
 
 `$ni = New-Object System.Windows.Forms.NotifyIcon
-`$ni.Text = "Kraken Now Playing"
+`$ni.Text = "$AppName"
 `$ni.Visible = `$true
 `$ni.Icon = `$iconDown
 
 `$menu = New-Object System.Windows.Forms.ContextMenuStrip
+
 `$miOpen = New-Object System.Windows.Forms.ToolStripMenuItem "Open Display URL"
-`$miOpen.add_Click({ Start-Process `$url | Out-Null })
-`$miLogs = New-Object System.Windows.Forms.ToolStripMenuItem "Open Log"
-`$miLogs.add_Click({ Start-Process "notepad.exe" -ArgumentList "$LogPath" | Out-Null })
-`$miQuit = New-Object System.Windows.Forms.ToolStripMenuItem "Quit"
-`$miQuit.add_Click({ `$ni.Visible = `$false; [System.Windows.Forms.Application]::Exit() })
-`$menu.Items.AddRange(@(`$miOpen, `$miLogs, `$miQuit))
+`$miOpen.add_Click({ Start-Process `$displayUrl | Out-Null })
+
+`$miLog = New-Object System.Windows.Forms.ToolStripMenuItem "Open Server Log"
+`$miLog.add_Click({ Start-Process "notepad.exe" -ArgumentList `$serverLog | Out-Null })
+
+`$miQuit = New-Object System.Windows.Forms.ToolStripMenuItem "Quit (Stop Server)"
+`$miQuit.add_Click({
+  try {
+    if (Test-Path `$stopPs1) {
+      # Run stop script reliably
+      & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "`$stopPs1" | Out-Null
+
+      Start-Sleep -Milliseconds 500
+
+      # If still listening, last-resort kill tree by port
+      `$conns = Get-NetTCPConnection -LocalPort `$port -ErrorAction SilentlyContinue
+      if (`$conns) {
+        `$pids = `$conns | Select-Object -ExpandProperty OwningProcess -Unique
+        foreach (`$p in `$pids) { & taskkill.exe /PID `$p /T /F | Out-Null }
+      }
+    } else {
+      `$ni.ShowBalloonTip(4000, "$AppName", "Stop-Server.ps1 missing.", [System.Windows.Forms.ToolTipIcon]::Error)
+      Start-Sleep -Milliseconds 1200
+    }
+  } catch {
+    `$ni.ShowBalloonTip(4000, "$AppName", "Failed to stop server. Try Stop Server shortcut.", [System.Windows.Forms.ToolTipIcon]::Error)
+    Start-Sleep -Milliseconds 1200
+  }
+
+  # Exit tray last (ensures stop happens first)
+  `$ni.Visible = `$false
+  [System.Windows.Forms.Application]::Exit()
+})
+
+`$menu.Items.AddRange(@(`$miOpen, `$miLog, `$miQuit))
 `$ni.ContextMenuStrip = `$menu
 
-`$wasUp = `$false
 `$timer = New-Object System.Windows.Forms.Timer
-`$timer.Interval = 5000
+`$timer.Interval = 2000
 `$timer.add_Tick({
+  `$isUp = `$false
   try {
     `$resp = Invoke-WebRequest -Uri `$checkUrl -UseBasicParsing -TimeoutSec 2
     `$isUp = (`$resp.StatusCode -eq 200)
@@ -327,62 +334,125 @@ function MakeIcon([System.Drawing.Color]`$color) {
 
   if (`$isUp) {
     `$ni.Icon = `$iconUp
-    `$ni.Text = "Kraken Now Playing - OK"
+    `$ni.Text = "$AppName - OK"
   } else {
     `$ni.Icon = `$iconDown
-    `$ni.Text = "Kraken Now Playing - DOWN"
-    if (`$wasUp) {
-      `$ni.ShowBalloonTip(5000, "Kraken Now Playing", "Server appears down. Check log / scheduled tasks.", [System.Windows.Forms.ToolTipIcon]::Error)
-    }
+    `$ni.Text = "$AppName - DOWN"
   }
-  `$wasUp = `$isUp
 })
-
 `$timer.Start()
+
 [System.Windows.Forms.Application]::Run()
 "@ | Set-Content -Path $trayPs1 -Encoding UTF8
 
-  OK "Health tray created: $trayPs1"
+  # ---- Hidden launchers (no windows) ----
+  $runServerVbs = Join-Path $BaseDir "RunServerHidden.vbs"
+@"
+Dim shell : Set shell = CreateObject("WScript.Shell")
+shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$BaseDir\Server-Run.ps1""", 0, False
+"@ | Set-Content -Path $runServerVbs -Encoding ASCII
+
+  $runTrayVbs = Join-Path $BaseDir "RunTrayHidden.vbs"
+@"
+Dim shell : Set shell = CreateObject("WScript.Shell")
+shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File ""$BaseDir\HealthTray.ps1""", 0, False
+"@ | Set-Content -Path $runTrayVbs -Encoding ASCII
+
+  # One launcher to start BOTH with one shortcut
+  $runAllVbs = Join-Path $BaseDir "RunAllHidden.vbs"
+@"
+Dim shell : Set shell = CreateObject("WScript.Shell")
+shell.Run "wscript.exe ""$BaseDir\RunServerHidden.vbs""", 0, False
+shell.Run "wscript.exe ""$BaseDir\RunTrayHidden.vbs""", 0, False
+"@ | Set-Content -Path $runAllVbs -Encoding ASCII
+
+  # ---- Open CAM URL helper ----
+  $openPs1 = Join-Path $BaseDir "Open-CAM-URL.ps1"
+@"
+`$ErrorActionPreference = "SilentlyContinue"
+`$url = "$Url"
+Set-Clipboard -Value `$url
+Start-Process `$url | Out-Null
+"@ | Set-Content -Path $openPs1 -Encoding UTF8
+
+  Ok "Runtime scripts written."
 }
 
 # -------------------------
-# Scheduled tasks
+# Auto-start (Task Scheduler or HKCU fallback)
 # -------------------------
-function RegisterTasks {
-  try { Unregister-ScheduledTask -TaskName $TaskServer -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch {}
-  try { Unregister-ScheduledTask -TaskName $TaskTray   -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch {}
+function TaskExists([string]$name) {
+  try { return [bool](Get-ScheduledTask -TaskName $name -ErrorAction Stop) } catch { return $false }
+}
 
-  $vbs = Join-Path $BaseDir "RunServerHidden.vbs"
-  if (!(Test-Path $vbs)) { F "Missing hidden runner: $vbs" }
+function StartAllNow {
+  $runAllVbs = Join-Path $BaseDir "RunAllHidden.vbs"
+  try { Start-Process "wscript.exe" -ArgumentList "`"$runAllVbs`"" | Out-Null } catch { Warn "Could not start (silent): $($_.Exception.Message)" }
+}
 
-  $trigger = New-ScheduledTaskTrigger -AtLogOn
-  $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+function RegisterAutoStart {
+  $runAllVbs = Join-Path $BaseDir "RunAllHidden.vbs"
+  if (!(Test-Path $runAllVbs)) { Fail "Missing: $runAllVbs" }
 
-  # Silent server via wscript
-  $actionServer = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$vbs`""
-  Register-ScheduledTask -TaskName $TaskServer -Action $actionServer -Trigger $trigger -Settings $settings -Description "Auto-start $AppName server silently at logon" | Out-Null
-  OK "Scheduled task installed: $TaskServer"
+  $taskSetupOk = $false
 
-  # Tray
-  $trayPs1 = Join-Path $BaseDir "HealthTray.ps1"
-  if (Test-Path $trayPs1) {
-    $actionTray = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File `"$trayPs1`""
-    Register-ScheduledTask -TaskName $TaskTray -Action $actionTray -Trigger $trigger -Settings $settings -Description "Tray health monitor for $AppName" | Out-Null
-    OK "Scheduled task installed: $TaskTray"
+  # Try Task Scheduler (often blocked on your machine)
+  try {
+    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+
+    try { Unregister-ScheduledTask -TaskName $TaskAll -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch {}
+
+    $actionAll = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$runAllVbs`""
+    $taskObj = New-ScheduledTask -Action $actionAll -Trigger $trigger -Settings $settings
+
+    Register-ScheduledTask -TaskName $TaskAll -InputObject $taskObj -Force -ErrorAction Stop | Out-Null
+
+    if (TaskExists $TaskAll) {
+      $taskSetupOk = $true
+      Ok "Auto-start configured via Task Scheduler."
+    }
+  } catch {
+    Warn "Task Scheduler setup failed; will fallback. Error: $($_.Exception.Message)"
+    $taskSetupOk = $false
   }
+
+  if ($taskSetupOk) {
+    try { Start-ScheduledTask -TaskName $TaskAll | Out-Null } catch { Warn "Could not start task now: $($_.Exception.Message)" }
+    return
+  }
+
+  # HKCU Run fallback (no admin required)
+  $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+  $allCmd = "wscript.exe `"$runAllVbs`""
+
+  try {
+    New-Item -Path $runKey -Force | Out-Null
+    New-ItemProperty -Path $runKey -Name "$AppName-All" -Value $allCmd -PropertyType String -Force | Out-Null
+    Ok "Auto-start configured via HKCU Run key."
+  } catch {
+    Fail "Failed to configure HKCU Run startup: $($_.Exception.Message)"
+  }
+
+  StartAllNow
 }
 
 # -------------------------
-# Shortcuts
+# Shortcuts (with icon fallback)
 # -------------------------
-function New-Shortcut($ShortcutPath, $TargetPath, $Arguments, $WorkingDir, $Description) {
+function Get-ShortcutIconLocation {
+  if (Test-Path $IconPath) { return "$IconPath,0" }
+  return "$env:SystemRoot\System32\shell32.dll,220"
+}
+
+function New-Shortcut([string]$ShortcutPath, [string]$TargetPath, [string]$Arguments, [string]$WorkingDir, [string]$Description) {
   $wsh = New-Object -ComObject WScript.Shell
   $sc = $wsh.CreateShortcut($ShortcutPath)
   $sc.TargetPath = $TargetPath
   if ($Arguments)  { $sc.Arguments = $Arguments }
   if ($WorkingDir) { $sc.WorkingDirectory = $WorkingDir }
   if ($Description){ $sc.Description = $Description }
-  $sc.IconLocation = "$env:SystemRoot\System32\shell32.dll, 220"
+  $sc.IconLocation = (Get-ShortcutIconLocation)
   $sc.Save()
 }
 
@@ -390,37 +460,35 @@ function CreateShortcuts {
   EnsureDir $StartMenuFolder
 
   $ps = (Get-Command powershell.exe).Source
-
   $open = Join-Path $BaseDir "Open-CAM-URL.ps1"
   $stop = Join-Path $BaseDir "Stop-Server.ps1"
   $uninst = Join-Path $BaseDir "Uninstall.ps1"
-  $tray = Join-Path $BaseDir "HealthTray.ps1"
-
-  # Start = kick the scheduled task (silent server)
-  $startCmdArgs = "-NoProfile -ExecutionPolicy Bypass -Command `"Start-ScheduledTask -TaskName '$TaskServer'`""
-  # Stop = run Stop-Server.ps1
-  $stopArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$stop`""
-  # Open = Open-CAM-URL.ps1
-  $openArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$open`""
-  # Uninstall = Uninstall.ps1
-  $unArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$uninst`""
-  # Repair = rerun installer in Repair mode (from installed copy not guaranteed; point to installed installer if you package it with EXE)
+  $runAllVbs = Join-Path $BaseDir "RunAllHidden.vbs"
   $repairArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$SrcRoot\installer.ps1`" -Mode Repair"
 
-  # Desktop shortcut (Open CAM URL)
-  $desktopLink = Join-Path $DesktopDir "Open CAM URL.lnk"
-  New-Shortcut $desktopLink $ps $openArgs $BaseDir "Copy and open the Kraken Web Integration URL."
-  OK "Desktop shortcut created: $desktopLink"
+  # Desktop: Open CAM URL
+  New-Shortcut (Join-Path $DesktopDir "Open CAM URL.lnk") $ps "-NoProfile -ExecutionPolicy Bypass -File `"$open`"" $BaseDir "Open/copy CAM URL"
+  Ok "Desktop shortcut created."
 
-  # Start Menu shortcuts
-  New-Shortcut (Join-Path $StartMenuFolder "Start Server (Silent).lnk") $ps $startCmdArgs $BaseDir "Start server via scheduled task (silent)."
-  New-Shortcut (Join-Path $StartMenuFolder "Stop Server.lnk")          $ps $stopArgs     $BaseDir "Stop server listening on port $Port."
-  New-Shortcut (Join-Path $StartMenuFolder "Open CAM URL.lnk")         $ps $openArgs     $BaseDir "Copy/open the Kraken Web Integration URL."
-  New-Shortcut (Join-Path $StartMenuFolder "Open Log.lnk")             "notepad.exe" "`"$LogPath`"" $BaseDir "Open server log."
-  New-Shortcut (Join-Path $StartMenuFolder "Repair.lnk")               $ps $repairArgs   $BaseDir "Repair install: recopy, reinstall deps, re-register tasks."
-  New-Shortcut (Join-Path $StartMenuFolder "Uninstall.lnk")            $ps $unArgs       $BaseDir "Uninstall KrakenNowPlaying."
+  # Start Menu: ONE Start shortcut starts server + tray (silent, no windows)
+  New-Shortcut (Join-Path $StartMenuFolder "Start (Silent).lnk") "wscript.exe" "`"$runAllVbs`"" $BaseDir "Start server + tray (silent)"
 
-  OK "Start Menu folder created: $StartMenuFolder"
+  # Stop server
+  New-Shortcut (Join-Path $StartMenuFolder "Stop Server.lnk") $ps "-NoProfile -ExecutionPolicy Bypass -File `"$stop`"" $BaseDir "Stop server"
+
+  # Open display URL
+  New-Shortcut (Join-Path $StartMenuFolder "Open CAM URL.lnk") $ps "-NoProfile -ExecutionPolicy Bypass -File `"$open`"" $BaseDir "Open/copy CAM URL"
+
+  # Logs
+  New-Shortcut (Join-Path $StartMenuFolder "Open Server Log.lnk") "notepad.exe" "`"$ServerLog`"" $BaseDir "Open server log"
+
+  # Repair
+  New-Shortcut (Join-Path $StartMenuFolder "Repair.lnk") $ps $repairArgs $BaseDir "Repair install"
+
+  # Uninstall
+  New-Shortcut (Join-Path $StartMenuFolder "Uninstall.lnk") $ps "-NoProfile -ExecutionPolicy Bypass -File `"$uninst`"" $BaseDir "Uninstall"
+
+  Ok "Start Menu shortcuts created at $StartMenuFolder"
 }
 
 # -------------------------
@@ -428,61 +496,56 @@ function CreateShortcuts {
 # -------------------------
 function WriteUninstaller {
   $uninstall = Join-Path $BaseDir "Uninstall.ps1"
-  @"
+@"
 `$ErrorActionPreference = "SilentlyContinue"
+
+# Stop server first
 try { & (Join-Path "$BaseDir" "Stop-Server.ps1") } catch {}
 
-try { Unregister-ScheduledTask -TaskName "$TaskServer" -Confirm:`$false | Out-Null } catch {}
-try { Unregister-ScheduledTask -TaskName "$TaskTray" -Confirm:`$false | Out-Null } catch {}
+# Remove scheduled task
+try { Unregister-ScheduledTask -TaskName "$TaskAll" -Confirm:`$false | Out-Null } catch {}
+
+# Remove HKCU startup
+try {
+  `$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+  Remove-ItemProperty -Path `$runKey -Name "$AppName-All" -ErrorAction SilentlyContinue
+} catch {}
 
 # Remove shortcuts
 try { Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path "$DesktopDir" "Open CAM URL.lnk") } catch {}
 try { Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$StartMenuFolder" } catch {}
 
+# Remove files
 try { Remove-Item -Recurse -Force -Path "$BaseDir" } catch {}
+
 Write-Host "Uninstalled."
 "@ | Set-Content -Path $uninstall -Encoding UTF8
-  OK "Uninstaller created: $uninstall"
+
+  Ok "Uninstaller written."
 }
 
 # -------------------------
 # MAIN
 # -------------------------
-I "$Mode: $AppName -> $BaseDir"
-EnsureDir $BaseDir
+try {
+  LogLine "----- $Mode begin -----"
+  Info "Install log: $InstallLog"
 
-Ensure-NodeInstalled
-
-if ($Mode -eq "Install") {
+  Ensure-NodeInstalled
   CopyProjectFiles
-  InstallServerDeps
+  if ($Mode -eq "Repair") { InstallServerDeps -Force } else { InstallServerDeps }
+
   WriteRuntimeScripts
-  WriteHealthTray
-  RegisterTasks
+  RegisterAutoStart
   WriteUninstaller
   CreateShortcuts
 
-  OK "Install complete."
-} else {
-  # Repair mode: recopy + reinstall deps + rewrite scripts + re-register tasks + recreate shortcuts
-  CopyProjectFiles
-  InstallServerDeps -Force
-  WriteRuntimeScripts
-  WriteHealthTray
-  RegisterTasks
-  WriteUninstaller
-  CreateShortcuts
-
-  OK "Repair complete."
-}
-
-I "Chrome extension folder: $ExtDir"
-I "Extension instructions: $BaseDir\INSTALL-EXTENSION.txt"
-I "NZXT CAM Web Integration URL: $Url"
-I "Logs: $LogPath"
-
-# Show extension instructions on fresh install only
-if ($Mode -eq "Install") {
-  try { Start-Process "notepad.exe" -ArgumentList (Join-Path $BaseDir "INSTALL-EXTENSION.txt") | Out-Null } catch {}
-  try { Start-Process "chrome.exe" -ArgumentList "chrome://extensions" | Out-Null } catch {}
+  Ok "$Mode complete."
+  Info "CAM URL: $Url"
+  Info "Extension folder: $ExtDir"
+  Info "Server log: $ServerLog"
+  Info "Install log: $InstallLog"
+} catch {
+  Warn "Installer failed. Check: $InstallLog"
+  throw
 }
