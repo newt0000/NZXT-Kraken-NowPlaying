@@ -185,6 +185,10 @@ Get-CimInstance Win32_Process |
 Where CommandLine -match "HealthTray" |
 % { Stop-Process $_.ProcessId -Force }
 
+or
+
+run forcestop.ps1 with powershell
+
 
 Server won’t stop
 ----------------
